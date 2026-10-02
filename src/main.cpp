@@ -66,7 +66,18 @@ constexpr int TFT_DC   = 2;
 constexpr int TFT_RST  = 4;
 constexpr int TFT_SCLK = 18;
 constexpr int TFT_MOSI = 23;
+constexpr char FIRMWARE_NAME[]    = "QUILL CLOCK";
+constexpr char FIRMWARE_VERSION[] = "1.6.2";
+constexpr char NTP_SERVER_1[] = "pool.ntp.org";
+constexpr char NTP_SERVER_2[] = "time.google.com";
+constexpr char NTP_SERVER_3[] = "time.cloudflare.com";
 
+// ============================================================
+// Display geometry
+// ============================================================
+
+constexpr int CX = 120;
+constexpr int CY = 120;
 
 Adafruit_GC9A01A tft(
   &SPI,
@@ -77,11 +88,49 @@ Adafruit_GC9A01A tft(
 
 
 // ============================================================
-// Display geometry
+// Startup status
+//
+// Displays a small status message beneath the QUILL splash
+// while the clock is waiting for Wi-Fi / NTP.
 // ============================================================
 
-constexpr int CX = 120;
-constexpr int CY = 120;
+void showStartupStatus(const char* message)
+{
+  // Clear only the lower status area.
+  // Leave the existing QUILL splash untouched.
+  tft.fillRect(
+    20,
+    150,
+    200,
+    45,
+    GC9A01A_BLACK);
+
+  tft.setTextWrap(false);
+  tft.setTextSize(1);
+  tft.setTextColor(
+    GC9A01A_WHITE,
+    GC9A01A_BLACK);
+
+  // Centre the message horizontally.
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  tft.getTextBounds(
+    message,
+    0,
+    0,
+    &x1,
+    &y1,
+    &w,
+    &h);
+
+  tft.setCursor(
+    CX - (w / 2),
+    165);
+
+  tft.print(message);
+}
+
 
 
 // ============================================================
@@ -771,6 +820,12 @@ void startNtpSync(
 
   startupSync = isStartup;
 
+  if (isStartup && !clockRunning)
+  {
+    showStartupStatus(
+      "Connecting...");
+  }
+
   ntpSyncComplete = false;
 
   WiFi.mode(
@@ -843,6 +898,12 @@ void serviceBackgroundNtp()
           ? "Startup Wi-Fi connected."
           : "Midnight Wi-Fi connected.");
 
+        if (startupSync && !clockRunning)
+          {
+          showStartupStatus(
+          "Synchronising time...");
+          }
+
 
         ntpSyncComplete =
           false;
@@ -854,9 +915,9 @@ void serviceBackgroundNtp()
 
         configTzTime(
           TIMEZONE,
-          "pool.ntp.org",
-          "time.google.com",
-          "time.cloudflare.com");
+          NTP_SERVER_1,
+          NTP_SERVER_2,
+          NTP_SERVER_3);
 
 
         ntpStartMillis =
@@ -877,7 +938,12 @@ void serviceBackgroundNtp()
           ? "Startup Wi-Fi unavailable."
           : "Midnight Wi-Fi unavailable.");
 
-
+        if (startupSync && !clockRunning)
+        {
+          showStartupStatus(
+              "Wi-Fi unavailable - retrying");
+        }
+        
         WiFi.disconnect(
           true);
 
@@ -1018,8 +1084,10 @@ void setup()
 
   Serial.println();
 
-  Serial.println(
-    "QUILL CLOCK v1.6");
+  Serial.println();
+  Serial.print(FIRMWARE_NAME);
+  Serial.print(" v");
+  Serial.println(FIRMWARE_VERSION);
 
 
   // ----------------------------------------------------------
@@ -1125,7 +1193,7 @@ void setup()
 
 
   tft.print(
-    "Clock v1.6");
+    FIRMWARE_VERSION);
 
 
   // ----------------------------------------------------------
@@ -1168,7 +1236,7 @@ void setup()
 
 
   Serial.println(
-    "Clock running.");
+    "Setup complete - waiting for valid time.");
 }
 
 
