@@ -1,6 +1,6 @@
 /*
   ============================================================
-  QUILL CLOCK v1.5.3
+  QUILL CLOCK v1.6
   ============================================================
 
   Hardware:
@@ -20,7 +20,9 @@
     BLK          3V3
 
   Features:
-    - Initial NTP synchronisation at startup
+    - Non-blocking Wi-Fi/NTP synchronisation at startup
+    - Startup remains responsive if Wi-Fi/NTP is unavailable
+    - Automatic startup retry after failed Wi-Fi/NTP attempt
     - NZ timezone with automatic NZST/NZDT
     - Smooth second hand: ~18.18 Hz
     - Minute hand: every 10 seconds
@@ -147,6 +149,22 @@ constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
 
 // NTP response timeout once Wi-Fi is connected.
 constexpr uint32_t NTP_TIMEOUT_MS = 15000;
+
+// Retry interval while the clock is still waiting for its first valid time.
+constexpr uint32_t STARTUP_RETRY_MS = 30000;
+
+// True once valid time has been obtained and the analogue face is running.
+bool clockRunning = false;
+
+// True while the initial boot-time synchronisation is being attempted.
+bool startupSync = true;
+
+
+// Forward declarations
+void startNtpSync(bool isStartup);
+
+// Used to schedule another startup attempt without blocking the display.
+uint32_t startupRetryMillis = 0;
 
 
 // ============================================================
@@ -630,24 +648,8 @@ void updateClock()
         "Midnight NTP sync requested.");
 
 
-      ntpSyncComplete = false;
-
-
-      WiFi.mode(
-        WIFI_STA);
-
-
-      WiFi.begin(
-        WIFI_SSID,
-        WIFI_PASSWORD);
-
-
-      ntpStartMillis =
-        millis();
-
-
-      ntpState =
-        NTP_CONNECTING;
+      startNtpSync(
+        false);
     }
   }
 
@@ -754,176 +756,81 @@ void updateClock()
 
 
 // ============================================================
-// Start-up NTP synchronisation
+// Start a Wi-Fi / NTP synchronisation
 //
-// This remains blocking because there is no useful clock to
-// display until we know the initial time.
+// This routine never waits.  It merely starts Wi-Fi and returns
+// immediately to loop().  serviceBackgroundNtp() advances the
+// state machine.
 // ============================================================
 
-bool initialiseTime()
+void startNtpSync(
+  bool isStartup)
 {
-  Serial.print(
-    "Connecting to Wi-Fi");
+  if (ntpState != NTP_IDLE)
+    return;
 
+  startupSync = isStartup;
+
+  ntpSyncComplete = false;
 
   WiFi.mode(
     WIFI_STA);
-
 
   WiFi.begin(
     WIFI_SSID,
     WIFI_PASSWORD);
 
+  ntpStartMillis =
+    millis();
 
-  uint8_t count = 0;
+  ntpState =
+    NTP_CONNECTING;
 
-
-  while (
-    WiFi.status()
-    != WL_CONNECTED)
+  if (isStartup)
   {
-    delay(500);
-
-    Serial.print(".");
-
-
-    if (++count > 40)
-    {
-      Serial.println();
-
-      Serial.println(
-        "Wi-Fi connection failed.");
-
-
-      return false;
-    }
+    Serial.println(
+      "Startup Wi-Fi/NTP sync started in background.");
   }
-
-
-  Serial.println();
-
-  Serial.println(
-    "Wi-Fi connected.");
-
-
-  Serial.print(
-    "IP address: ");
-
-
-  Serial.println(
-    WiFi.localIP());
-
-
-  // ----------------------------------------------------------
-  // Register SNTP callback
-  // ----------------------------------------------------------
-
-  sntp_set_time_sync_notification_cb(
-    timeSyncCallback);
-
-
-  ntpSyncComplete = false;
-
-
-  // ----------------------------------------------------------
-  // Configure timezone and NTP
-  // ----------------------------------------------------------
-
-  configTzTime(
-    TIMEZONE,
-    "pool.ntp.org",
-    "time.google.com",
-    "time.cloudflare.com");
-
-
-  Serial.print(
-    "Synchronising time");
-
-
-  struct tm timeinfo;
-
-  uint8_t attempts = 0;
-
-
-  while (
-    !getLocalTime(
-      &timeinfo))
+  else
   {
-    Serial.print(".");
-
-
-    delay(500);
-
-
-    if (++attempts > 40)
-    {
-      Serial.println();
-
-      Serial.println(
-        "NTP synchronisation failed.");
-
-
-      return false;
-    }
+    Serial.println(
+      "Midnight Wi-Fi/NTP sync started in background.");
   }
-
-
-  Serial.println();
-
-  Serial.println(
-    "Time synchronised.");
-
-
-  Serial.println(
-    &timeinfo,
-    "%A %d %B %Y %H:%M:%S");
-
-
-  // ----------------------------------------------------------
-  // Wi-Fi no longer required
-  // ----------------------------------------------------------
-
-  WiFi.disconnect(true);
-
-
-  WiFi.mode(
-    WIFI_OFF);
-
-
-  Serial.println(
-    "Wi-Fi off.");
-
-
-  return true;
 }
 
 
 // ============================================================
-// Background midnight NTP service
+// Background Wi-Fi / NTP service
 //
-// IMPORTANT:
-//
-// There are NO blocking while loops here.
-//
-// This function executes quickly and returns to loop(),
-// allowing the clock renderer to continue normally.
+// Used for both startup and midnight resynchronisation.
+// There are no blocking loops here.
 // ============================================================
 
 void serviceBackgroundNtp()
 {
+  // ----------------------------------------------------------
+  // If startup has not yet obtained valid time, periodically
+  // begin another attempt.
+  // ----------------------------------------------------------
+
+  if (
+    !clockRunning &&
+    ntpState == NTP_IDLE &&
+    millis() - startupRetryMillis >= STARTUP_RETRY_MS)
+  {
+    startNtpSync(true);
+  }
+
+
   switch (ntpState)
   {
-    // ========================================================
-    // Nothing to do
-    // ========================================================
-
     case NTP_IDLE:
       return;
 
 
-    // ========================================================
+    // --------------------------------------------------------
     // Waiting for Wi-Fi
-    // ========================================================
+    // --------------------------------------------------------
 
     case NTP_CONNECTING:
     {
@@ -932,20 +839,19 @@ void serviceBackgroundNtp()
         == WL_CONNECTED)
       {
         Serial.println(
-          "Midnight Wi-Fi connected.");
+          startupSync
+          ? "Startup Wi-Fi connected."
+          : "Midnight Wi-Fi connected.");
 
 
-        // Reset callback flag before starting SNTP.
         ntpSyncComplete =
           false;
 
 
-        // Register callback.
         sntp_set_time_sync_notification_cb(
           timeSyncCallback);
 
 
-        // Request NTP update.
         configTzTime(
           TIMEZONE,
           "pool.ntp.org",
@@ -967,11 +873,9 @@ void serviceBackgroundNtp()
         >= WIFI_TIMEOUT_MS)
       {
         Serial.println(
-          "Midnight Wi-Fi unavailable.");
-
-
-        Serial.println(
-          "Clock continuing without sync.");
+          startupSync
+          ? "Startup Wi-Fi unavailable."
+          : "Midnight Wi-Fi unavailable.");
 
 
         WiFi.disconnect(
@@ -984,6 +888,21 @@ void serviceBackgroundNtp()
 
         ntpState =
           NTP_IDLE;
+
+
+        if (startupSync && !clockRunning)
+        {
+          startupRetryMillis =
+            millis();
+
+          Serial.println(
+            "Clock waiting for time; retry scheduled.");
+        }
+        else
+        {
+          Serial.println(
+            "Clock continuing without sync.");
+        }
       }
 
 
@@ -991,24 +910,24 @@ void serviceBackgroundNtp()
     }
 
 
-    // ========================================================
+    // --------------------------------------------------------
     // Wi-Fi connected; waiting for SNTP callback
-    // ========================================================
+    // --------------------------------------------------------
 
     case NTP_WAITING:
     {
       if (ntpSyncComplete)
       {
         Serial.println(
-          "Midnight NTP sync complete.");
+          startupSync
+          ? "Startup NTP sync complete."
+          : "Midnight NTP sync complete.");
 
 
-        // Clear flag.
         ntpSyncComplete =
           false;
 
 
-        // We no longer need the radio.
         WiFi.disconnect(
           true);
 
@@ -1019,6 +938,24 @@ void serviceBackgroundNtp()
 
         ntpState =
           NTP_IDLE;
+
+
+        // First valid time: replace splash with the analogue face.
+        if (!clockRunning)
+        {
+          drawStaticFace();
+
+          handsInitialised =
+            false;
+
+          updateClock();
+
+          clockRunning =
+            true;
+
+          Serial.println(
+            "Analogue clock started.");
+        }
       }
 
 
@@ -1027,11 +964,9 @@ void serviceBackgroundNtp()
         >= NTP_TIMEOUT_MS)
       {
         Serial.println(
-          "Midnight NTP timeout.");
-
-
-        Serial.println(
-          "Clock continuing without sync.");
+          startupSync
+          ? "Startup NTP timeout."
+          : "Midnight NTP timeout.");
 
 
         WiFi.disconnect(
@@ -1044,6 +979,21 @@ void serviceBackgroundNtp()
 
         ntpState =
           NTP_IDLE;
+
+
+        if (startupSync && !clockRunning)
+        {
+          startupRetryMillis =
+            millis();
+
+          Serial.println(
+            "Clock waiting for time; retry scheduled.");
+        }
+        else
+        {
+          Serial.println(
+            "Clock continuing without sync.");
+        }
       }
 
 
@@ -1069,7 +1019,7 @@ void setup()
   Serial.println();
 
   Serial.println(
-    "QUILL CLOCK v1.5.3");
+    "QUILL CLOCK v1.6");
 
 
   // ----------------------------------------------------------
@@ -1175,94 +1125,26 @@ void setup()
 
 
   tft.print(
-    "Clock v1.5.3");
+    "Clock v1.6");
 
 
   // ----------------------------------------------------------
   // Initial NTP synchronisation
+  //
+  // Non-blocking: leave the QUILL splash visible while Wi-Fi
+  // and SNTP work in the background.
   // ----------------------------------------------------------
 
-  if (!initialiseTime())
-  {
-    tft.fillScreen(
-      GC9A01A_BLACK);
+  sntp_set_time_sync_notification_cb(
+    timeSyncCallback);
 
 
-    tft.setTextColor(
-      GC9A01A_RED);
+  startupRetryMillis =
+    millis();
 
 
-    tft.setTextSize(2);
-
-
-    tft.setCursor(
-      72,
-      90);
-
-
-    tft.print(
-      "ERROR");
-
-
-    tft.setTextColor(
-      GC9A01A_WHITE);
-
-
-    tft.setTextSize(1);
-
-
-    tft.setCursor(
-      52,
-      125);
-
-
-    tft.print(
-      "WiFi / NTP failed");
-
-
-    while (true)
-    {
-      delay(1000);
-    }
-  }
-
-
-  // ----------------------------------------------------------
-  // Draw clock
-  // ----------------------------------------------------------
-
-  drawStaticFace();
-
-
-  updateClock();
-
-
-  // ----------------------------------------------------------
-  // Prevent an immediate midnight retry if the ESP32 happens
-  // to be powered up during the first 10 seconds after
-  // midnight. The startup NTP sync has already occurred.
-  // ----------------------------------------------------------
-
-  time_t now =
-    time(nullptr);
-
-
-  struct tm currentTime;
-
-
-  localtime_r(
-    &now,
-    &currentTime);
-
-
-  if (
-    currentTime.tm_hour == 0 &&
-    currentTime.tm_min == 0 &&
-    currentTime.tm_sec < 10)
-  {
-    lastNtpAttemptDay =
-      currentTime.tm_yday;
-  }
+  startNtpSync(
+    true);
 
 
   // ----------------------------------------------------------
@@ -1308,6 +1190,7 @@ void loop()
   // ----------------------------------------------------------
 
   if (
+    clockRunning &&
     now - lastDisplayUpdate
     >= SECOND_UPDATE_MS)
   {
